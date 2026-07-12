@@ -1,39 +1,104 @@
 name: Katabump Auto Renew
 
-on:
+on:  
   schedule:
-  - cron: '0 2 */3 * *'  # 每天 UTC 0点 (北京时间 8点) 运行,根据服务到期时间自行修改
-  workflow_dispatch: # 允许手动触发
+    - cron: '17 2 * * *'  # 每天运行一次（UTC时间 02:17）
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   Renew-Katabump:
     runs-on: ubuntu-latest
     permissions:
       actions: write  
-      contents: read
+      contents: write
     
     steps:
-    - uses: actions/checkout@v6
+    - name: Interval Check (Strict 4-day cycle)
+      id: check
+      run: |
+        # ── 配置区 ──────────────────────────────────────────
+        # 1. 设定起始日期
+        START_DATE="2026-05-05"
+
+        # 2. 设定间隔天数
+        INTERVAL=4
+        # ──────────────────────────────────────────────────
+
+        export TZ='Asia/Shanghai'
+
+        # 如果是手动触发，则直接运行
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "run=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # 获取上海时间当前的日期（00:00:00 确保计算整天）
+        CURRENT_DATE=$(date +%Y-%m-%d)
+        
+        # 转换为时间戳
+        CURRENT_TS=$(date -d "$CURRENT_DATE 00:00:00" +%s)
+        START_TS=$(date -d "$START_DATE 00:00:00" +%s)
+
+        # 计算天数差
+        # 用当前时间减去起始时间
+        DIFF=$(( ($CURRENT_TS - $START_TS) / 86400 ))
+
+        # 逻辑判断
+        if [ $DIFF -lt 0 ]; then
+          echo "Today is before the START_DATE. Skipping."
+          echo "run=false" >> $GITHUB_OUTPUT
+        elif [ $(( $DIFF % $INTERVAL )) -eq 0 ]; then
+          echo "Matches cycle! Days since $START_DATE: $DIFF (Modulo $INTERVAL = 0)."
+          echo "run=true" >> $GITHUB_OUTPUT
+        else
+          echo "Not today. Days since $START_DATE: $DIFF. Next run in $(( $INTERVAL - ($DIFF % $INTERVAL) )) days."
+          echo "run=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: ⚙ 设置 Python
+      if: steps.check.outputs.run == 'true'
       uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
     - name: 🛠️ 安装系统依赖和python依赖
+      if: steps.check.outputs.run == 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
         pip install seleniumbase requests
         seleniumbase install chromedriver
 
-    - name: ⚙ 设置代理 (sing-box)
-      continue-on-error: true
-      env:
-        NODE_LINK: ${{ secrets.NODE_LINK }}
+    - name: 启用 WARP
+      if: steps.check.outputs.run == 'true'
+      uses: fscarmen/warp-on-actions@v1.3
+      with:
+        stack: dual
+        mode: client
+
+    - name: 配置 DNS 并验证 WARP
+      if: steps.check.outputs.run == 'true'
       run: |
-        bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+        set -euo pipefail
+        sudo systemctl stop systemd-resolved 2>/dev/null || true
+        sudo systemctl disable systemd-resolved 2>/dev/null || true
+        sudo rm -f /etc/resolv.conf
+        echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1" | sudo tee /etc/resolv.conf
+        sudo chattr +i /etc/resolv.conf 2>/dev/null || true
+        sleep 3
+        echo "[INFO] DNS 测试:"
+        nslookup dashboard.katabump.com 1.1.1.1 || echo "[WARN] 解析失败"
+        echo ""
+        for i in {1..30}; do
+          status=$(curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'warp=\K\w+' || echo unknown)
+          [[ "$status" =~ ^(on|plus)$ ]] && echo "WARP 已连接" && break
+          echo "WARP 连接中... ($i/30)"
+          sleep 2
+        done
+        echo -n "出口 IP: " && curl -s https://api.ipify.org && echo
 
     - name: 🚀 运行续期脚本
+      if: steps.check.outputs.run == 'true'
       env:
         KATABUMP_EMAIL: ${{ secrets.KATABUMP_EMAIL }}
         KATABUMP_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
@@ -43,17 +108,29 @@ jobs:
         xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
           python3 app.py
         
-    - name: 🧹 清理旧的工作流运行记录
-      if: always()
+    # --- 新增的防暂停代码开始 ---
+    - name: Commit time.txt to repo
+      if: steps.check.outputs.run == 'true'
       env:
-        GH_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
-        count=0
-        for run_id in $runs; do
-          count=$((count + 1))
-          if [ $count -gt 1 ]; then
-            echo "删除运行记录: $run_id"
-            gh run delete $run_id || true
-          fi
-        done
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # 如果 time.txt 不存在，说明是第一次运行
+        if [ ! -f time.txt ]; then
+          echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+        else
+          echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+        fi
+        
+        git add time.txt
+        
+        # 如果有更改再提交
+        if git diff --cached --quiet; then
+          echo "无变化，无需提交"
+        else
+          git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+          git push origin HEAD:main
+        fi
+    # --- 新增的防暂停代码结束 ---
