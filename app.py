@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+import os, sys
 import time
 import subprocess
 import requests
@@ -355,7 +355,7 @@ def _goto_server_detail(sb) -> bool:
     if alert_text and "can't renew" in alert_text.lower():
         print(f"ℹ️  页面顶部提示: {alert_text}")
         send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text)
-        return False
+        return True
 
     # 多种选择器尝试查找 See 链接
     selectors = [
@@ -581,9 +581,11 @@ def _check_renew_result(sb):
             send_tg_message("✅", "续期成功", alert_text)
         else:
             send_tg_message("ℹ️", "续期操作已执行", alert_text)
+            sys.exit(1)
     else:
         print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
         send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示")
+        sys.exit(1)
 
 
 def renew_server(sb):
@@ -593,10 +595,10 @@ def renew_server(sb):
     print("#" * 25)
 
     if not _goto_server_detail(sb):
-        return
+        sys.exit(1)
 
     if not _open_renew_modal(sb):
-        return
+        sys.exit(1)
 
     altcha_ok = _solve_altcha(sb)
     if not altcha_ok:
@@ -636,6 +638,7 @@ def main():
         else:
             print("\n❌ 登录失败，终止后续续期操作。")
             send_tg_message("❌", "登录失败", "未知")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
