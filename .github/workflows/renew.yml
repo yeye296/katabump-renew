@@ -55,6 +55,10 @@ jobs:
           echo "run=false" >> $GITHUB_OUTPUT
         fi
 
+    - name: Checkout repository
+      if: steps.check.outputs.run == 'true'
+      uses: actions/checkout@v6
+
     - name: ⚙ 设置 Python
       if: steps.check.outputs.run == 'true'
       uses: actions/setup-python@v6
